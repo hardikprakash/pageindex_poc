@@ -1,0 +1,19 @@
+# No services needed — PageIndex is a cloud API.
+# This file is a placeholder if you add local services later.
+
+# Example: if you want to add a local Ollama for embeddings comparison
+# services:
+#   ollama:
+#     image: ollama/ollama
+#     ports:
+#       - "11434:11434"
+#     volumes:
+#       - ollama_data:/root/.ollama
+#     deploy:
+#       resources:
+#         reservations:
+#           devices:
+#             - capabilities: [gpu]
+#
+# volumes:
+#   ollama_data:
