@@ -1,0 +1,8 @@
+What is PageIndex?
+
+PageIndex is a vectorless, reasoning-based RAG (retrieval) framework that simulates how human experts navigate and extract knowledge from long, complex documents. Instead of relying on vector similarity search, it transforms documents into a tree-structured index and enables LLMs to perform agentic reasoning over that structure for context-aware retrieval. The retrieval process is traceable and explainable, and requires no vector database and no chunking.
+
+To learn more, please see a detailed introduction to the PageIndex framework . Also check out our GitHub repo  for open-source code, and the cookbooks, tutorials, and blog  for additional usage guides and examples.
+PageIndex Workflow
+
+PageIndex Workflow: Tree index generation, and agentic LLM reasoning over the index for context-aware retrieval

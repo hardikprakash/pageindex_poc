@@ -1,0 +1,129 @@
+Agentic Retrieval with PageIndex Chat API
+
+Similarity-based RAG based on Vector-DB has shown big limitations in recent AI applications, reasoning-based or agentic retrieval has become important in current developments. However, unlike classic RAG pipeine with embedding input, top-K chunks returns, re-rank, what should a agentic-native retreival API looks like?
+
+For an agentic-native retrieval system, we need the ability to prompt for retrieval just as naturally as you interact with ChatGPT. Below, we provide an example of how the PageIndex Chat API enables this style of prompt-driven retrieval.
+PageIndex Chat API
+
+PageIndex Chat is a AI assistant that allow you chat with multiple super-long documents without worrying about limited context or context rot problem. It is based on PageIndex, a vectorless reasoning-based RAG framework which gives more transparent and reliable results like a human expert.
+
+You can now access PageIndex Chat with API or SDK.
+📝 Notebook Overview
+
+This notebook demonstrates a simple, minimal example of agentic retrieval with PageIndex. You will learn:
+
+    How to use PageIndex Chat API.
+    How to prompt the PageIndex Chat to make it a retrieval system
+
+Install PageIndex SDK
+
+%pip install -q --upgrade pageindex
+
+Setup PageIndex
+
+from pageindex import PageIndexClient
+
+# Get your PageIndex API key from https://dash.pageindex.ai/api-keys
+PAGEINDEX_API_KEY = "YOUR_PAGEINDEX_API_KEY"
+pi_client = PageIndexClient(api_key=PAGEINDEX_API_KEY)
+
+Upload a document
+
+import os, requests
+
+pdf_url = "https://arxiv.org/pdf/2507.13334.pdf"
+pdf_path = os.path.join("../data", pdf_url.split('/')[-1])
+os.makedirs(os.path.dirname(pdf_path), exist_ok=True)
+
+response = requests.get(pdf_url)
+with open(pdf_path, "wb") as f:
+    f.write(response.content)
+print(f"Downloaded {pdf_url}")
+
+doc_id = pi_client.submit_document(pdf_path)["doc_id"]
+print('Document Submitted:', doc_id)
+
+Downloaded https://arxiv.org/pdf/2507.13334.pdf
+Document Submitted: pi-cmi34m6jy01sg0bqzofch62n8
+
+Check the processing status
+
+from pprint import pprint
+
+doc_info = pi_client.get_document(doc_id)
+pprint(doc_info)
+
+if doc_info['status'] == 'completed':
+  print(f"\n Document ready! ({doc_info['pageNum']} pages)")
+elif doc_info['status'] == 'processing':
+  print("\n Document is still processing. Please wait and check again.")
+
+{'createdAt': '2025-11-16T08:36:41.177000',
+ 'description': 'This survey provides a comprehensive overview and taxonomy of '
+                'Context Engineering for Large Language Models, covering '
+                'foundational components, system implementations, evaluation '
+                'methods, and future research directions.',
+ 'id': 'pi-cmi1gp1hg01t20do2l3bgzwz1',
+ 'name': '2507.13334_19.pdf',
+ 'pageNum': 166,
+ 'status': 'completed'}
+
+ Document ready! (166 pages)
+
+Ask a question about this document
+
+query = "What are the evaluation methods used in this paper?"
+
+for chunk in pi_client.chat_completions(
+    messages=[{"role": "user", "content": query}],
+    doc_id=doc_id,
+    stream=True
+):
+    print(chunk, end='', flush=True)
+
+Agentic Retrieval with PageIndex Chat API
+
+You can now easily prompt the PageIndex Chat API to be a retrieval assistant.
+
+retrieval_prompt = f"""
+Your job is to retrieve the raw relevant content from the document based on the user's query.
+
+Query: {query}
+
+Return in JSON format:
+```json
+[
+  {{
+    "page": <number>,
+    "content": "<raw text>"
+  }},
+  ...
+]
+```
+"""
+
+full_response = ""
+
+for chunk in pi_client.chat_completions(
+    messages=[{"role": "user", "content": retrieval_prompt}],
+    doc_id=doc_id,
+    stream=True
+):
+    print(chunk, end='', flush=True)
+    full_response += chunk
+
+Extract the JSON retreived results
+
+%pip install -q jsonextractor
+
+def extract_json(content):
+    from json_extractor import JsonExtractor
+    start_idx = content.find("```json")
+    if start_idx != -1:
+        start_idx += 7  # Adjust index to start after the delimiter
+        end_idx = content.rfind("```")
+        json_content = content[start_idx:end_idx].strip()
+    return JsonExtractor.extract_valid_json(json_content)
+
+from pprint import pprint
+pprint(extract_json(full_response))
