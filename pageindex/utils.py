@@ -23,7 +23,13 @@ OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
 def count_tokens(text, model=None):
     if not text:
         return 0
-    enc = tiktoken.encoding_for_model(model)
+    try:
+        enc = tiktoken.encoding_for_model(model) if model else tiktoken.get_encoding("cl100k_base")
+    except KeyError:
+        # OpenRouter model names (e.g. "openai/gpt-oss-120b") are not recognised by
+        # tiktoken.  Fall back to cl100k_base which is accurate for all GPT-4-class
+        # models and a reasonable approximation for any other transformer.
+        enc = tiktoken.get_encoding("cl100k_base")
     tokens = enc.encode(text)
     return len(tokens)
 

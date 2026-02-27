@@ -9,6 +9,7 @@ Ingest pipeline — orchestrates the full flow from PDF to searchable storage.
       → write everything to SQLite
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -144,8 +145,11 @@ async def ingest_pdf(
 
     try:
         # ── 5. Generate PageIndex tree ───────────────────────────────────────
+        # page_index_main() calls asyncio.run() internally, so it cannot be
+        # called from within a running event loop.  Running it in a thread
+        # gives it an event-loop-free context where asyncio.run() works fine.
         logger.info("Generating PageIndex tree for %s …", basename)
-        tree_result = _generate_tree(dest_path)
+        tree_result = await asyncio.to_thread(_generate_tree, dest_path)
 
         structure = tree_result["structure"]
         if isinstance(structure, dict):

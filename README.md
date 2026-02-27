@@ -1,158 +1,251 @@
-# PageIndex PoC: Financial Filing Q&A System
+# PageIndex PoC — Financial Filing Q&A System
 
-A re-implementation of [PageIndex](https://github.com/getmetal/pageindex) for querying and analyzing financial filings across multiple companies and years using semantic tree structures and hybrid retrieval.
+A re-implementation of [PageIndex](https://github.com/nicholasgasior/pageindex) for querying and analyzing multi-year, multi-company financial filings (Form 20-F, 10-K, etc.) using semantic tree structures, chunk embeddings, and hybrid retrieval.
 
 ## Overview
 
-This project implements a vectorless, reasoning-based RAG system specifically designed for multi-year, multi-company financial documents (e.g., Form 20-F filings). Instead of traditional vector similarity search, it leverages **PageIndex's semantic tree structures** combined with **LLM-powered tree navigation** for accurate, cited answers.
+Instead of traditional vector-only RAG, this system uses the **PageIndex** library to build hierarchical semantic trees from long PDF documents. Each document is parsed into a tree of titled sections with page ranges. The node texts are then chunked, embedded (via Ollama), and stored alongside the tree in SQLite for hybrid retrieval at query time.
 
-### Key Features
+### What's Working Today
 
-- 📄 **Multi-document support**: Ingest and query across multiple Form 20-F filings from different companies and years
-- 🌳 **Semantic tree indexing**: Generates hierarchical document structures with semantic summaries
-- 🔍 **Hybrid retrieval**: Combines value-based node scoring with LLM tree search for robust results
-- 💾 **Embedding storage**: Optional embeddings (768-dim) for value-based search via Ollama
-- 📝 **Cited answers**: LLM generates answers with page/node citations for verification
-- ⚡ **CLI ingest pipeline**: Single-document or batch ingestion with metadata auto-detection
-- 🧪 **Comprehensive tests**: 56 unit tests covering all core modules
-- 🐳 **Docker-ready**: Ollama embeddings service included in docker-compose
+| Layer | Status | Details |
+|-------|--------|---------|
+| **Ingestion pipeline** | ✅ Complete | PDF → PageIndex tree → chunk → embed → SQLite |
+| **CLI tooling** | ✅ Complete | Single-doc & batch ingest with pre-flight checks |
+| **Corpus management** | ✅ Complete | List, get, delete documents; cascade deletes |
+| **Embeddings (Ollama)** | ✅ Complete | `nomic-embed-text-v2-moe` (768-d), batched, retries |
+| **Unit tests** | ✅ Complete | 56 tests, 100 % passing |
+| **Streamlit frontend** | ✅ Scaffold | Query page + corpus page; needs FastAPI backend |
+| **Retrieval pipeline** | 🚧 Planned | Value search + LLM tree search + hybrid merge |
+| **FastAPI backend** | 🚧 Planned | `/corpus`, `/ingest`, `/query`, `/health` |
 
-## Architecture
-
-### Core Components
-
-```
-backend/
-├── config.py          # Centralized configuration
-├── database.py        # SQLite schema and connection
-├── models.py          # Pydantic schemas
-├── llm/
-│   └── client.py      # OpenRouter LLM wrapper
-├── ingest/
-│   ├── metadata.py    # PDF filename parser (TICKER_DOCTYPE_YEAR)
-│   ├── chunker.py     # Token-aware text chunking
-│   ├── embedder.py    # Ollama embedding client
-│   └── pipeline.py    # Full ingest orchestration
-└── corpus/
-    └── manager.py     # Document CRUD operations
-```
-
-### Data Flow
-
-```
-PDF → PageIndex Tree Generation → Chunking & Embedding → SQLite Storage
-                                           ↓
-Query → Value Search + LLM Search → Hybrid Merge → Answer + Citations
-```
-
-## Installation
+## Quick Start
 
 ### Prerequisites
 
-- Python 3.9+
+- Python 3.11+ (tested on 3.12)
 - Docker & Docker Compose (for Ollama embeddings)
-- OpenRouter API key
+- An [OpenRouter](https://openrouter.ai/) API key (or any OpenAI-compatible endpoint)
 
-### Setup
+### 1. Clone & create virtual environment
 
-1. **Clone and setup virtual environment:**
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   ```
+```bash
+git clone <repo-url> && cd pageindex_poc
+python -m venv .venv
+source .venv/bin/activate
+```
 
-2. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   pip install pytest pytest-asyncio  # For testing
-   ```
+### 2. Install dependencies
 
-3. **Start Ollama service:**
-   ```bash
-   docker-compose up -d
-   ```
-   This starts Ollama on port 11435 with `nomic-embed-text-v2-moe` model pre-loaded.
+```bash
+pip install -r requirements.txt
+pip install pytest pytest-asyncio httpx numpy  # dev / test extras
+```
 
-4. **Configure environment:**
-   ```bash
-   cp .env.example .env
-   ```
-   Edit `.env` with your OpenRouter API key:
-   ```
-   OPENAI_API_KEY=sk-or-v1-xxxxx
-   OPENAI_BASE_URL=https://openrouter.ai/api/v1
-   LLM_MODEL=openai/gpt-5.2
-   ```
+### 3. Configure environment
 
-## Usage
+Create a `.env` file in the project root:
 
-### Ingestion Pipeline
+```dotenv
+OPENAI_API_KEY=sk-or-v1-xxxxx
+OPENAI_BASE_URL=https://openrouter.ai/api/v1
+LLM_MODEL=openai/gpt-oss-120b
+```
 
-Ingest financial PDFs with automatic metadata detection from filenames.
+### 4. Start Ollama (embedding service)
+
+```bash
+docker compose up -d
+```
+
+This starts `ollama-pageindex` on port **11435** with GPU support. Pull the embedding model on first run:
+
+```bash
+docker exec ollama-pageindex ollama pull nomic-embed-text-v2-moe
+```
+
+### 5. Ingest a document
+
+```bash
+python -m scripts.ingest --pdf data/INFY_20F_2022.pdf --company "Infosys"
+```
+
+The script runs **pre-flight checks** (API key present, Ollama reachable, embedding model loaded) before starting the expensive LLM tree generation.
+
+## Ingestion Pipeline
+
+### How It Works
+
+```
+PDF file
+  │
+  ├─ 1. Metadata auto-detected from filename (TICKER_DOCTYPE_YEAR.pdf)
+  ├─ 2. Duplicate check against (ticker, fiscal_year, doc_type)
+  ├─ 3. PageIndex tree generation (LLM calls via OpenRouter)
+  │     └─ Produces hierarchical sections with summaries + page ranges + text
+  ├─ 4. Derive auxiliary structures (tree_no_text, node_map)
+  ├─ 5. Chunk node texts (512 tokens, 64 overlap, min 32)
+  ├─ 6. Embed chunks via Ollama (768-d, batches of 32)
+  └─ 7. Write to SQLite (documents + trees + chunks tables)
+```
+
+### Filename Convention
+
+PDFs must follow: **`TICKER_DOCTYPE_YEAR.pdf`**
+
+| Example | Ticker | Doc Type | Year |
+|---------|--------|----------|------|
+| `INFY_20F_2022.pdf` | INFY | 20-F | 2022 |
+| `TCS_10K_2023.pdf` | TCS | 10-K | 2023 |
+| `AAPL_20F_2021.pdf` | AAPL | 20-F | 2021 |
+
+You can also supply metadata explicitly with `--ticker`, `--year`, `--doc-type` flags.
+
+### CLI Reference
 
 **Single document:**
 ```bash
 python -m scripts.ingest --pdf data/INFY_20F_2022.pdf --company "Infosys"
 ```
 
-**Batch ingestion:**
+**Batch ingestion** (all PDFs in a directory):
 ```bash
-python -m scripts.ingest --dir data/pdfs/ --company-map mapping.json
+python -m scripts.ingest --dir data/pdfs/ --company-map data/company_map.json
 ```
 
-Where `mapping.json`:
+The company map maps tickers to company names:
 ```json
 {
-  "INFY_20F_2022.pdf": "Infosys",
-  "INFY_20F_2023.pdf": "Infosys",
-  "TCS_20F_2022.pdf": "Tata Consultancy Services"
+  "INFY": "Infosys Ltd",
+  "TCS": "Tata Consultancy Services"
 }
 ```
 
-**Force re-ingestion** (skip duplicate check):
+**Force re-ingest** (overwrite existing document):
 ```bash
 python -m scripts.ingest --pdf data/INFY_20F_2022.pdf --company "Infosys" --force
 ```
 
-### Filename Format
+**Explicit metadata override:**
+```bash
+python -m scripts.ingest --pdf data/report.pdf \
+    --company "Infosys" --ticker INFY --year 2022 --doc-type 20-F
+```
 
-PDFs must follow the naming convention: `TICKER_DOCTYPE_YEAR.pdf`
+### Pre-flight Checks
 
-Examples:
-- `INFY_20F_2022.pdf` → Infosys, Form 20-F, 2022
-- `TCS_10K_2023.pdf` → TCS, Form 10-K, 2023
+The ingest script verifies before starting:
 
-### Query Interface
+1. `OPENAI_API_KEY` is set
+2. Ollama is reachable and the configured embedding model is loaded
 
-(Implementation pending - Phase 5 in roadmap)
+If either check fails, the script exits with a clear error message before any LLM calls are made.
+
+### Example Output
+
+```
+00:00:17 │ INFO  │ ingest │ ✓ OpenRouter API key found
+00:00:17 │ INFO  │ ingest │ ✓ Ollama reachable at http://localhost:11435 (model: nomic-embed-text-v2-moe)
+00:00:17 │ INFO  │ ingest │ ▶ Ingesting INFY_20F_2022.pdf
+...
+01:02:12 │ INFO  │ ingest │ ✓ INFY_20F_2022.pdf → 76b1dee3...  |  70 nodes, 336 chunks, 57 pages  [1077.2s]
+01:02:12 │ INFO  │ ingest │ Done: 1 succeeded, 0 failed, 1 total
+```
+
+> **Note:** Tree generation is the slowest step (~5–15 min per document) since it makes many LLM calls to build and verify the hierarchical structure.
+
+## Frontend (Streamlit)
+
+The frontend is a Streamlit app with two pages. It communicates with the FastAPI backend via HTTP.
+
+### Running the Frontend
 
 ```bash
-python -m scripts.query "What was the revenue in 2022?"
+streamlit run frontend/app.py
 ```
+
+By default it connects to `http://localhost:8000`. Override with:
+```bash
+BACKEND_URL=http://your-server:8000 streamlit run frontend/app.py
+```
+
+### Pages
+
+**Query Page** — Ask questions about ingested financial filings:
+- Free-text query input
+- Filter by company and fiscal year
+- Confidence threshold slider (LOW / MEDIUM / HIGH)
+- Displays answer with source citations, conflict detection, and debug panel
+- Query history in the sidebar
+
+**Corpus Page** — Manage ingested documents:
+- *Ingested Documents* tab: summary metrics (doc count, companies, years, chunks) + full document table
+- *Ingest New* tab: upload PDFs via the browser, specify company/ticker/year, and trigger ingestion
+
+> **Note:** The frontend requires the FastAPI backend to be running. The backend is planned but not yet implemented — the frontend scaffold is ready for integration once the backend endpoints exist.
 
 ## Testing
 
-Run the comprehensive test suite:
-
 ```bash
-# All tests
+# Run all 56 tests
 python -m pytest tests/ -v
 
-# Specific module
+# Run a specific module
 python -m pytest tests/test_pipeline.py -v
 
 # With coverage
 python -m pytest tests/ --cov=backend
 ```
 
-### Test Coverage
+### Test Suite Breakdown
 
-- **test_metadata.py** (12 tests): Filename parsing, normalization, edge cases
-- **test_chunker.py** (8 tests): Token counting, splitting, overlap handling
-- **test_database.py** (5 tests): Schema, CRUD, constraints
-- **test_corpus.py** (12 tests): Document operations, tree retrieval
-- **test_embedder.py** (3 tests): Embedding generation, batching
-- **test_pipeline.py** (16 tests): End-to-end ingest flow with mocked externals
+| Module | Tests | What It Covers |
+|--------|-------|----------------|
+| `test_metadata.py` | 12 | Filename parsing, case normalization, edge cases |
+| `test_chunker.py` | 8 | Token counting, chunk splitting, overlap, min-size filter |
+| `test_database.py` | 5 | Schema creation, CRUD, unique constraints, cascading deletes |
+| `test_corpus.py` | 12 | Document list/get/delete, tree retrieval |
+| `test_embedder.py` | 3 | Embedding generation, batching logic |
+| `test_pipeline.py` | 16 | Full ingest flow (mocked externals), duplicates, force re-ingest |
+
+All external services (PageIndex LLM calls, Ollama) are mocked in tests — no API keys or Docker needed to run the suite.
+
+## Project Structure
+
+```
+pageindex_poc/
+├── backend/
+│   ├── config.py              # Env var configuration
+│   ├── database.py            # SQLite schema + connection helpers
+│   ├── models.py              # Pydantic schemas (DocumentRecord, IngestResult, ParsedMetadata)
+│   ├── corpus/
+│   │   └── manager.py         # Document CRUD operations
+│   ├── ingest/
+│   │   ├── metadata.py        # TICKER_DOCTYPE_YEAR filename parser
+│   │   ├── chunker.py         # Token-aware text chunking (tiktoken)
+│   │   ├── embedder.py        # Ollama HTTP embedding client
+│   │   └── pipeline.py        # Full ingest orchestration
+│   ├── llm/
+│   │   └── client.py          # Async OpenRouter LLM wrapper
+│   └── retrieval/             # (planned) Hybrid search modules
+├── frontend/
+│   └── app.py                 # Streamlit UI (Query + Corpus pages)
+├── pageindex/                 # Local PageIndex library (tree generation)
+├── scripts/
+│   └── ingest.py              # Ingestion CLI with pre-flight checks
+├── tests/                     # 56 unit tests
+├── docs/
+│   ├── context/               # PageIndex reference materials
+│   └── design/                # 8 design documents (architecture, API, etc.)
+├── data/
+│   ├── uploads/               # Copies of ingested PDFs
+│   └── pageindex.db           # SQLite database
+├── docker-compose.yaml        # Ollama GPU service
+├── requirements.txt           # Python dependencies
+├── run_pageindex.py           # Standalone PageIndex runner (for experimentation)
+├── .env                       # API keys and config (not committed)
+└── .gitignore
+```
 
 ## Configuration
 
@@ -160,134 +253,83 @@ python -m pytest tests/ --cov=backend
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OPENAI_API_KEY` | (required) | OpenRouter API key |
-| `OPENAI_BASE_URL` | https://openrouter.ai/api/v1 | LLM endpoint |
-| `LLM_MODEL` | openai/gpt-5.2 | Model to use |
-| `OLLAMA_URL` | http://localhost:11435 | Ollama service endpoint |
-| `OLLAMA_MODEL` | nomic-embed-text-v2-moe | Embedding model |
-| `DB_PATH` | data/pageindex.db | SQLite database location |
-| `CHUNK_MAX_TOKENS` | 512 | Max tokens per chunk |
-| `CHUNK_OVERLAP_TOKENS` | 64 | Token overlap between chunks |
-| `CHUNK_MIN_TOKENS` | 32 | Minimum chunk size |
+| `OPENAI_API_KEY` | *(required)* | OpenRouter API key |
+| `OPENAI_BASE_URL` | `https://openrouter.ai/api/v1` | LLM endpoint |
+| `LLM_MODEL` | `openai/gpt-5.2` | LLM model for tree generation and queries |
+| `OLLAMA_URL` | `http://localhost:11435` | Ollama embedding service |
+| `EMBEDDING_MODEL` | `nomic-embed-text-v2-moe` | Ollama embedding model |
+| `EMBEDDING_DIM` | `768` | Embedding vector dimension |
+| `DATABASE_PATH` | `data/pageindex.db` | SQLite database location |
+| `UPLOAD_DIR` | `data/uploads` | Where ingested PDFs are copied |
+| `CHUNK_MAX_TOKENS` | `512` | Max tokens per chunk |
+| `CHUNK_OVERLAP_TOKENS` | `64` | Token overlap between chunks |
+| `CHUNK_MIN_TOKENS` | `32` | Minimum chunk size (smaller chunks dropped) |
+| `EMBED_BATCH_SIZE` | `32` | Texts per Ollama embedding request |
+| `PAGEINDEX_MODEL` | *(same as LLM_MODEL)* | Model for PageIndex tree generation |
+| `TOC_CHECK_PAGES` | `20` | Pages to scan for table of contents |
+| `MAX_PAGES_PER_NODE` | `10` | Max pages per tree node before subdivision |
+| `MAX_TOKENS_PER_NODE` | `20000` | Max tokens per tree node |
+| `BACKEND_URL` | `http://localhost:8000` | Backend URL (used by Streamlit frontend) |
 
 ### Database Schema
 
-Three-table design optimized for retrieval:
+Three tables with cascading deletes:
 
-- **documents**: Metadata (ticker, fiscal_year, doc_type, company_name, page_count)
-- **trees**: Full PageIndex tree JSON + derived structures (tree_no_text, node_map)
-- **chunks**: Searchable text chunks with 768-dim embeddings (BLOB)
-
-Unique constraint on `(ticker, fiscal_year, doc_type)` prevents duplicates.
-
-## Project Structure
-
-```
-pageindex_poc/
-├── backend/                 # Core backend modules
-├── scripts/
-│   └── ingest.py           # Ingestion CLI
-├── tests/                  # Unit tests (56 tests)
-├── docs/
-│   ├── context/            # Reference materials
-│   └── design/             # Design documents (8 docs)
-├── data/
-│   ├── uploads/            # Ingested PDFs
-│   └── pageindex.db        # SQLite database
-├── docker-compose.yaml     # Ollama service
-├── requirements.txt        # Python dependencies
-└── README.md               # This file
-```
-
-## Development Roadmap
-
-### ✅ Completed
-- [x] Design & architecture documentation
-- [x] Ingestion pipeline (PDF → tree → chunks → embeddings → SQLite)
-- [x] Metadata parser (TICKER_DOCTYPE_YEAR format)
-- [x] Token-aware chunker with overlap
-- [x] Ollama embeddings integration
-- [x] SQLite database with cascading deletes
-- [x] CLI ingestion script (single & batch)
-- [x] 56 comprehensive unit tests (100% passing)
-
-### 🚧 In Progress / Planned
-- [ ] Retrieval pipeline (value search + LLM tree search)
-- [ ] Hybrid merge & deduplication
-- [ ] Answer generation with citations
-- [ ] FastAPI backend endpoints (`/corpus`, `/ingest`, `/query`)
-- [ ] Frontend integration (Streamlit)
-- [ ] End-to-end testing with real Form 20-F filings
+- **documents** — Document metadata: `id`, `company`, `ticker`, `fiscal_year`, `doc_type`, `filename`, `page_count`, `total_tokens`, `node_count`, `chunk_count`, `status`, `ingest_timestamp`. Unique on `(ticker, fiscal_year, doc_type)`.
+- **trees** — Full PageIndex tree JSON, stripped tree (no text), and flat node map. One row per document.
+- **chunks** — Text chunks with token count, page range, and 768-d embedding stored as BLOB. Indexed on `(doc_id)` and `(doc_id, node_id)`.
 
 ## Common Operations
 
 ### Resetting Data & Ingesting New Documents
 
-To wipe all ingested data and start fresh with new documents:
-
+**Full reset:**
 ```bash
-# 1. Delete the SQLite database and uploaded PDFs
 rm -f data/pageindex.db data/pageindex.db-wal data/pageindex.db-shm
 rm -rf data/uploads/
 
-# 2. Ingest new documents (the database is auto-created on first ingest)
-python -m scripts.ingest --dir data/new_pdfs/ --company-map data/company_map.json
+# Re-ingest (database auto-created on first run)
+python -m scripts.ingest --dir data/pdfs/ --company-map data/company_map.json
 ```
 
-To selectively remove a single document (its tree and chunks are cascade-deleted automatically):
-
+**Delete a single document** (tree + chunks cascade-deleted):
 ```python
 from backend.corpus.manager import list_documents, delete_document
 
-# List all ingested documents to find the doc_id
 for doc in list_documents():
     print(doc["id"], doc["ticker"], doc["fiscal_year"], doc["doc_type"])
 
-# Delete a specific document by ID
 delete_document("the-doc-id-here")
 ```
 
-To replace a specific document without touching the rest, use `--force` to overwrite the existing entry matching the same `(ticker, fiscal_year, doc_type)`:
-
+**Replace a single document:**
 ```bash
-python -m scripts.ingest --pdf data/INFY_20F_2022.pdf --company "Infosys Ltd" --force
+python -m scripts.ingest --pdf data/INFY_20F_2022.pdf --company "Infosys" --force
 ```
 
 ### Re-embedding with a Different Model
 
-Embeddings are generated during ingestion. To switch to a different embedding model, you need to update the config and re-ingest all documents so that every chunk uses the same model's embeddings.
+Since embeddings are stored per-chunk, switching models requires a full re-ingest.
 
-**Step 1 — Update embedding config** in your `.env` file:
-
-```bash
-# Change model and dimension to match the new model
-EMBEDDING_MODEL=mxbai-embed-large       # or any Ollama-supported model
-EMBEDDING_DIM=1024                       # must match the model's output dimension
+**1. Update `.env`:**
+```dotenv
+EMBEDDING_MODEL=mxbai-embed-large
+EMBEDDING_DIM=1024
 ```
 
-**Step 2 — Ensure the new model is pulled in Ollama:**
-
+**2. Pull the new model into Ollama:**
 ```bash
-# Pull the model into Ollama
 docker exec ollama-pageindex ollama pull mxbai-embed-large
-
-# Verify it's available
-curl http://localhost:11435/api/tags
+curl http://localhost:11435/api/tags  # verify
 ```
 
-**Step 3 — Wipe and re-ingest everything** (embeddings are stored per-chunk, so a full re-ingest is required):
-
+**3. Wipe and re-ingest:**
 ```bash
-# Delete existing data
 rm -f data/pageindex.db data/pageindex.db-wal data/pageindex.db-shm
-
-# Re-ingest all documents (trees are regenerated + re-embedded with new model)
 python -m scripts.ingest --dir data/pdfs/ --company-map data/company_map.json
 ```
 
-> **Note:** If you only want to re-embed without regenerating the PageIndex trees (which is the expensive LLM step), that workflow is not yet supported but is planned for a future `--re-embed-only` flag.
-
-**Common embedding models available via Ollama:**
+**Common Ollama embedding models:**
 
 | Model | Dimensions | Notes |
 |-------|-----------|-------|
@@ -298,47 +340,78 @@ python -m scripts.ingest --dir data/pdfs/ --company-map data/company_map.json
 
 ## Troubleshooting
 
-### Ollama Connection Issues
+### Ollama Not Reachable
 ```bash
-# Check if Ollama is running
+# Check status
 curl http://localhost:11435/api/tags
 
-# Restart Ollama service
-docker-compose restart ollama-pageindex
+# Restart
+docker compose restart ollama-pageindex
+
+# Check logs
+docker compose logs ollama-pageindex
 ```
 
-### Database Corruption
-```bash
-# Reset database (WARNING: Deletes all data)
-rm data/pageindex.db
-python -m scripts.ingest --pdf data/sample.pdf --company "Test"
+### Pre-flight Check Fails
+The ingest script will print exactly what's wrong:
 ```
+✗ OPENAI_API_KEY is not set. Add it to your .env file (format: sk-or-v1-...).
+✗ Ollama is not reachable at http://localhost:11435 or model 'nomic-embed-text-v2-moe' is not loaded. Run: docker compose up -d
+```
+
+### Ingestion Fails Mid-Way
+If the LLM accuracy check for a large node drops below 60 %, the node is kept as a flat leaf instead of crashing the ingest. A warning is logged:
+```
+Could not subdivide large node "9. Risks related to the ADSs" — keeping as leaf node.
+```
+
+### Database Reset
+```bash
+rm -f data/pageindex.db data/pageindex.db-wal data/pageindex.db-shm
+```
+The database is auto-created on the next ingest run.
 
 ### OpenRouter API Errors
 - Verify API key in `.env` (format: `sk-or-v1-...`)
-- Check account has sufficient credits
+- Check account credits at [openrouter.ai/credits](https://openrouter.ai/credits)
 - Ensure base URL is `https://openrouter.ai/api/v1`
 
-## Design References
+## Development Roadmap
 
-See `docs/design/` for detailed documentation:
-- `01_project_overview.md` - Scope and key decisions
-- `02_architecture.md` - Component diagrams and flow
-- `03_data_model.md` - Database schema and node scoring formulas
-- `04_ingest_pipeline.md` - Ingestion workflow details
-- `05_retrieval_pipeline.md` - Query and retrieval strategy
-- `06_api_contract.md` - REST API specification
-- `07_frontend_adaptation.md` - Frontend integration notes
-- `08_implementation_plan.md` - Phased development plan
+### ✅ Complete
+- [x] Design & architecture documentation (8 design docs)
+- [x] Ingestion pipeline (PDF → PageIndex tree → chunk → embed → SQLite)
+- [x] Metadata parser (TICKER_DOCTYPE_YEAR filename convention)
+- [x] Token-aware chunker with overlap (tiktoken cl100k_base)
+- [x] Ollama embedding client with batching and retries
+- [x] SQLite database with WAL mode + cascading deletes
+- [x] CLI ingestion script with pre-flight service checks
+- [x] Corpus manager (CRUD operations)
+- [x] Async LLM client (OpenRouter via OpenAI SDK)
+- [x] Streamlit frontend scaffold (Query + Corpus pages)
+- [x] 56 unit tests (100 % passing, all externals mocked)
+- [x] Real-document ingestion tested (INFY 20-F 2022: 70 nodes, 336 chunks, 57 pages)
 
-## License
+### 🚧 Planned
+- [ ] Retrieval pipeline — value-based search (embed query → cosine similarity → node scoring)
+- [ ] Retrieval pipeline — LLM tree search (prompt LLM with tree structure → node selection)
+- [ ] Hybrid merge & deduplication of retrieval results
+- [ ] Answer generation with page/node citations
+- [ ] FastAPI backend (`/corpus`, `/ingest`, `/query`, `/health`)
+- [ ] Frontend ↔ backend integration (currently scaffold only)
+- [ ] End-to-end testing across multiple companies and years
 
-[Specify your license here]
+## Design Documents
 
-## Contributing
+Detailed design docs are in `docs/design/`:
 
-[Contribution guidelines]
-
-## Contact
-
-For questions or issues, please open an issue or contact the development team.
+| Doc | Topic |
+|-----|-------|
+| `01_project_overview.md` | Scope, key decisions, constraints |
+| `02_architecture.md` | Component diagrams and data flow |
+| `03_data_model.md` | Database schema and node scoring formula |
+| `04_ingest_pipeline.md` | Ingestion workflow details |
+| `05_retrieval_pipeline.md` | Query and retrieval strategy |
+| `06_api_contract.md` | REST API specification |
+| `07_frontend_adaptation.md` | Frontend integration notes |
+| `08_implementation_plan.md` | Phased build plan |

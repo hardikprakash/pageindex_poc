@@ -996,18 +996,30 @@ async def process_large_node_recursively(node, page_list, opt=None, logger=None)
     if node['end_index'] - node['start_index'] > opt.max_page_num_each_node and token_num >= opt.max_token_num_each_node:
         print('large node:', node['title'], 'start_index:', node['start_index'], 'end_index:', node['end_index'], 'token_num:', token_num)
 
-        node_toc_tree = await meta_processor(node_page_list, mode='process_no_toc', start_index=node['start_index'], opt=opt, logger=logger)
-        node_toc_tree = await check_title_appearance_in_start_concurrent(node_toc_tree, page_list, model=opt.model, logger=logger)
-        
-        # Filter out items with None physical_index before post_processing
-        valid_node_toc_items = [item for item in node_toc_tree if item.get('physical_index') is not None]
-        
-        if valid_node_toc_items and node['title'].strip() == valid_node_toc_items[0]['title'].strip():
-            node['nodes'] = post_processing(valid_node_toc_items[1:], node['end_index'])
-            node['end_index'] = valid_node_toc_items[1]['start_index'] if len(valid_node_toc_items) > 1 else node['end_index']
-        else:
-            node['nodes'] = post_processing(valid_node_toc_items, node['end_index'])
-            node['end_index'] = valid_node_toc_items[0]['start_index'] if valid_node_toc_items else node['end_index']
+        try:
+            node_toc_tree = await meta_processor(node_page_list, mode='process_no_toc', start_index=node['start_index'], opt=opt, logger=logger)
+            node_toc_tree = await check_title_appearance_in_start_concurrent(node_toc_tree, page_list, model=opt.model, logger=logger)
+            
+            # Filter out items with None physical_index before post_processing
+            valid_node_toc_items = [item for item in node_toc_tree if item.get('physical_index') is not None]
+            
+            if valid_node_toc_items and node['title'].strip() == valid_node_toc_items[0]['title'].strip():
+                node['nodes'] = post_processing(valid_node_toc_items[1:], node['end_index'])
+                node['end_index'] = valid_node_toc_items[1]['start_index'] if len(valid_node_toc_items) > 1 else node['end_index']
+            else:
+                node['nodes'] = post_processing(valid_node_toc_items, node['end_index'])
+                node['end_index'] = valid_node_toc_items[0]['start_index'] if valid_node_toc_items else node['end_index']
+        except Exception as e:
+            # If sub-structure processing failed (e.g. low LLM accuracy), keep the
+            # node as a flat leaf rather than propagating the failure upward.
+            if logger:
+                logger.warning(
+                    'Could not subdivide large node "%s" (pages %s–%s): %s. '
+                    'Keeping as leaf node.',
+                    node.get('title', '?'), node.get('start_index'), node.get('end_index'), e
+                )
+            else:
+                print(f'Warning: could not subdivide large node "{node.get("title", "?")}" — keeping as leaf. Reason: {e}')
         
     if 'nodes' in node and node['nodes']:
         tasks = [

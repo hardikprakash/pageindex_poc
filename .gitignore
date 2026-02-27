@@ -77,3 +77,4 @@ logs/
 
 # Model Context
 docs/context
+*.pdf

@@ -41,7 +41,9 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend.ingest.pipeline import ingest_pdf  # noqa: E402
+from backend.ingest.embedder import check_ollama  # noqa: E402
 from backend.database import init_db             # noqa: E402
+from backend import config                       # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -114,7 +116,48 @@ async def _ingest_one(
         return False
 
 
+async def _preflight_checks() -> bool:
+    """
+    Verify that all required services are reachable before starting ingestion.
+    Returns True if all checks pass, False otherwise.
+    """
+    ok = True
+
+    # ── 1. OpenRouter API key ────────────────────────────────────────────────
+    if not config.OPENAI_API_KEY:
+        logger.error(
+            "✗ OPENAI_API_KEY is not set. "
+            "Add it to your .env file (format: sk-or-v1-...)."
+        )
+        ok = False
+    else:
+        logger.info("✓ OpenRouter API key found")
+
+    # ── 2. Ollama embedding service ──────────────────────────────────────────
+    ollama_ok = await check_ollama()
+    if not ollama_ok:
+        logger.error(
+            "✗ Ollama is not reachable at %s or model '%s' is not loaded. "
+            "Run: docker compose up -d",
+            config.OLLAMA_URL,
+            config.EMBEDDING_MODEL,
+        )
+        ok = False
+    else:
+        logger.info(
+            "✓ Ollama reachable at %s (model: %s)",
+            config.OLLAMA_URL,
+            config.EMBEDDING_MODEL,
+        )
+
+    return ok
+
+
 async def run(args: argparse.Namespace):
+    if not await _preflight_checks():
+        logger.error("Pre-flight checks failed — aborting.")
+        sys.exit(1)
+
     init_db()
 
     company_map: dict | None = None
