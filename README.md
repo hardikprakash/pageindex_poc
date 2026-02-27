@@ -219,6 +219,83 @@ pageindex_poc/
 - [ ] Frontend integration (Streamlit)
 - [ ] End-to-end testing with real Form 20-F filings
 
+## Common Operations
+
+### Resetting Data & Ingesting New Documents
+
+To wipe all ingested data and start fresh with new documents:
+
+```bash
+# 1. Delete the SQLite database and uploaded PDFs
+rm -f data/pageindex.db data/pageindex.db-wal data/pageindex.db-shm
+rm -rf data/uploads/
+
+# 2. Ingest new documents (the database is auto-created on first ingest)
+python -m scripts.ingest --dir data/new_pdfs/ --company-map data/company_map.json
+```
+
+To selectively remove a single document (its tree and chunks are cascade-deleted automatically):
+
+```python
+from backend.corpus.manager import list_documents, delete_document
+
+# List all ingested documents to find the doc_id
+for doc in list_documents():
+    print(doc["id"], doc["ticker"], doc["fiscal_year"], doc["doc_type"])
+
+# Delete a specific document by ID
+delete_document("the-doc-id-here")
+```
+
+To replace a specific document without touching the rest, use `--force` to overwrite the existing entry matching the same `(ticker, fiscal_year, doc_type)`:
+
+```bash
+python -m scripts.ingest --pdf data/INFY_20F_2022.pdf --company "Infosys Ltd" --force
+```
+
+### Re-embedding with a Different Model
+
+Embeddings are generated during ingestion. To switch to a different embedding model, you need to update the config and re-ingest all documents so that every chunk uses the same model's embeddings.
+
+**Step 1 — Update embedding config** in your `.env` file:
+
+```bash
+# Change model and dimension to match the new model
+EMBEDDING_MODEL=mxbai-embed-large       # or any Ollama-supported model
+EMBEDDING_DIM=1024                       # must match the model's output dimension
+```
+
+**Step 2 — Ensure the new model is pulled in Ollama:**
+
+```bash
+# Pull the model into Ollama
+docker exec ollama-pageindex ollama pull mxbai-embed-large
+
+# Verify it's available
+curl http://localhost:11435/api/tags
+```
+
+**Step 3 — Wipe and re-ingest everything** (embeddings are stored per-chunk, so a full re-ingest is required):
+
+```bash
+# Delete existing data
+rm -f data/pageindex.db data/pageindex.db-wal data/pageindex.db-shm
+
+# Re-ingest all documents (trees are regenerated + re-embedded with new model)
+python -m scripts.ingest --dir data/pdfs/ --company-map data/company_map.json
+```
+
+> **Note:** If you only want to re-embed without regenerating the PageIndex trees (which is the expensive LLM step), that workflow is not yet supported but is planned for a future `--re-embed-only` flag.
+
+**Common embedding models available via Ollama:**
+
+| Model | Dimensions | Notes |
+|-------|-----------|-------|
+| `nomic-embed-text-v2-moe` | 768 | Default — good balance of quality & speed |
+| `mxbai-embed-large` | 1024 | Higher quality, slightly slower |
+| `all-minilm` | 384 | Fastest, lower quality |
+| `snowflake-arctic-embed` | 1024 | Strong multilingual support |
+
 ## Troubleshooting
 
 ### Ollama Connection Issues
