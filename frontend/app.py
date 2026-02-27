@@ -1,5 +1,5 @@
 """
-Streamlit frontend — thin client for the Financial Filings PageIndex Agent.
+Streamlit frontend — thin client for the Financial Filings Graph RAG Agent.
 Communicates with the FastAPI backend via HTTP.
 
 Entry point: streamlit run frontend/app.py
@@ -14,7 +14,7 @@ from collections import defaultdict
 BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
 
 st.set_page_config(
-    page_title="Financial Filings Agent (PageIndex)",
+    page_title="Financial Filings Agent",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -23,13 +23,11 @@ st.set_page_config(
 # ── Session State ────────────────────────────────────────────────────────────
 if "query_history" not in st.session_state:
     st.session_state.query_history = []
-if "messages" not in st.session_state:
-    st.session_state.messages = []
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def fetch_corpus() -> list[dict]:
+def fetch_corpus():
     """Fetch corpus info from backend."""
     try:
         response = httpx.get(f"{BACKEND_URL}/corpus", timeout=10.0)
@@ -44,7 +42,7 @@ def fetch_corpus() -> list[dict]:
 
 def render_query_page():
     st.title("📊 Financial Filings Agent")
-    st.caption("Ask questions about financial filings — powered by PageIndex reasoning-based RAG.")
+    st.caption("Ask questions about financial filings with full source citation.")
 
     # Sidebar
     corpus = fetch_corpus()
@@ -66,12 +64,18 @@ def render_query_page():
             default=available_years,
         )
 
+        min_confidence = st.select_slider(
+            "Minimum confidence to display",
+            options=["LOW", "MEDIUM", "HIGH"],
+            value="LOW",
+        )
+
         st.markdown("---")
         st.markdown("**About**")
         st.caption(
-            "PageIndex reasoning-based RAG agent for financial document Q&A. "
-            "Uses tree-structured document indexing with agentic retrieval "
-            "for accurate, cited answers. No vector DB or chunking required."
+            "Graph RAG agent for financial document Q&A. "
+            "Uses Neo4j knowledge graph with structured fact extraction "
+            "and hybrid retrieval for accurate, cited answers."
         )
 
         # Recent queries
@@ -98,7 +102,7 @@ def render_query_page():
         st.caption(f"{len(query)} characters")
 
     if submit and query.strip():
-        with st.spinner("Querying PageIndex (reasoning-based retrieval)..."):
+        with st.spinner("Retrieving and generating answer..."):
             try:
                 response = httpx.post(
                     f"{BACKEND_URL}/query",
@@ -107,7 +111,7 @@ def render_query_page():
                         "companies": selected_companies,
                         "years": selected_years,
                     },
-                    timeout=120.0,
+                    timeout=30.0,
                 )
             except httpx.ConnectError:
                 st.error("Cannot connect to backend. Is the FastAPI server running?")
@@ -118,6 +122,16 @@ def render_query_page():
 
         if response.status_code == 200:
             data = response.json()
+
+            # Check confidence threshold
+            conf_label = data.get("retrieval_confidence", {}).get("label", "LOW")
+            conf_order = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+            if conf_order.get(conf_label, 0) < conf_order.get(min_confidence, 0):
+                st.warning(
+                    f"Answer confidence ({conf_label}) is below your threshold ({min_confidence}). "
+                    "Showing anyway with warning."
+                )
+
             render_answer(data)
 
             # Save to history
@@ -134,38 +148,69 @@ def render_query_page():
 
 
 def render_answer(data: dict):
-    """Render the PageIndex agent's response."""
-    # 1. Answer text
+    """Render the agent's response."""
+    # 1. Confidence badge
+    confidence = data.get("retrieval_confidence", {})
+    label = confidence.get("label", "LOW")
+    color = {"HIGH": "green", "MEDIUM": "orange", "LOW": "red"}.get(label, "red")
+    st.markdown(
+        f"**Confidence:** :{color}[{label}] "
+        f"({confidence.get('answered_by_facts', 0)} facts, "
+        f"{confidence.get('answered_by_chunks', 0)} text sources, "
+        f"{confidence.get('unanswered', 0)} unanswered)"
+    )
+
+    # 2. Answer text
     st.markdown("---")
     st.markdown(data.get("answer", "No answer generated."))
 
-    # 2. Citations
-    citations = data.get("citations", [])
-    if citations:
-        st.markdown("---")
-        st.markdown(f"**Sources cited ({len(citations)}):**")
-        for c in citations:
-            st.markdown(f"- 📄 **{c.get('document', '')}** · page {c.get('page', '')}")
+    # 3. Unanswerable sub-questions
+    unanswerable = data.get("unanswerable_sub_questions", [])
+    if unanswerable:
+        with st.expander(f"⚠ {len(unanswerable)} sub-question(s) could not be answered", expanded=True):
+            for q in unanswerable:
+                st.markdown(f"- {q}")
 
-    # 3. Usage stats
-    usage = data.get("usage", {})
-    if usage:
-        with st.expander("Token usage"):
-            cols = st.columns(3)
-            cols[0].metric("Prompt tokens", usage.get("prompt_tokens", 0))
-            cols[1].metric("Completion tokens", usage.get("completion_tokens", 0))
-            cols[2].metric("Total tokens", usage.get("total_tokens", 0))
+    # 4. Conflicts
+    conflicts = data.get("conflicts_detected", [])
+    if conflicts:
+        with st.expander(f"⚠ {len(conflicts)} data conflict(s) detected", expanded=True):
+            for c in conflicts:
+                st.warning(c)
 
-    # 4. Doc IDs used
-    doc_ids = data.get("doc_ids_used", [])
-    if doc_ids:
-        with st.expander(f"Documents queried ({len(doc_ids)})"):
-            for did in doc_ids:
-                st.code(did)
+    # 5. Citations panel
+    st.markdown("---")
+    st.markdown("**Sources used:**")
+    render_citations(data.get("resolved_citations", []))
 
-    # 5. Debug: full response
+    # 6. Debug expander
     with st.expander("Debug: full response"):
         st.json(data)
+
+
+def render_citations(citations: list[dict]):
+    """Render citations grouped by company and year."""
+    if not citations:
+        st.caption("No citations.")
+        return
+
+    groups = defaultdict(list)
+    for c in citations:
+        groups[(c.get("company", ""), c.get("fiscal_year", 0))].append(c)
+
+    for (company, year), cites in sorted(groups.items()):
+        st.markdown(f"**{company} — FY{year}**")
+        for c in cites:
+            confidence_icon = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(
+                c.get("confidence", ""), "⚪"
+            )
+            with st.expander(
+                f"{confidence_icon} `{c.get('key', '')}` · "
+                f"{c.get('section_path', '')} · p{c.get('page', '')} · "
+                f"{c.get('chunk_type', '')}",
+                expanded=False,
+            ):
+                st.caption(c.get("content_preview", ""))
 
 
 # ── Page 2: Corpus ───────────────────────────────────────────────────────────
@@ -200,66 +245,31 @@ def render_corpus_tab():
     col1.metric("Documents", len(docs))
     col2.metric("Companies", len(set(d.get("company", "") for d in docs)))
     col3.metric("Years covered", len(set(d.get("fiscal_year", 0) for d in docs)))
-    col4.metric(
-        "Total pages",
-        sum(d.get("page_count", 0) for d in docs),
-    )
+    col4.metric("Total chunks", sum(d.get("chunk_count", 0) for d in docs))
 
     # Documents table
     import pandas as pd
 
     df = pd.DataFrame(docs)
-    display_cols = [
-        c for c in [
-            "company", "ticker", "fiscal_year", "doc_type",
-            "page_count", "status", "doc_id", "created_at",
-        ]
-        if c in df.columns
-    ]
+    display_cols = [c for c in ["company", "ticker", "fiscal_year", "doc_type", "chunk_count", "fact_count", "ingest_timestamp"] if c in df.columns]
     if display_cols:
         df = df[display_cols].sort_values(["company", "fiscal_year"])
         st.dataframe(df, use_container_width=True, hide_index=True)
 
-    # Delete button
-    st.markdown("---")
-    st.markdown("**Delete a document**")
-    doc_ids = [d.get("doc_id", "") for d in docs]
-    doc_labels = [
-        f"{d.get('company', '')} — FY{d.get('fiscal_year', '')} ({d.get('doc_id', '')})"
-        for d in docs
-    ]
-    selected_idx = st.selectbox("Select document to delete", range(len(doc_labels)), format_func=lambda i: doc_labels[i])
-    if st.button("Delete", type="secondary"):
-        doc_id = doc_ids[selected_idx]
-        try:
-            resp = httpx.delete(f"{BACKEND_URL}/corpus/{doc_id}", timeout=10.0)
-            if resp.status_code == 200:
-                st.success(f"Deleted {doc_id}")
-                st.rerun()
-            else:
-                st.error(f"Delete failed: {resp.text}")
-        except Exception as e:
-            st.error(f"Error: {e}")
-
 
 def render_ingest_tab():
     """Upload and ingest new PDFs."""
-    st.markdown(
-        "Upload one or more PDF financial filings. They will be processed by "
-        "PageIndex — tree generation + OCR happens automatically."
-    )
+    st.markdown("Upload one or more PDF financial filings to add them to the corpus.")
 
     col1, col2 = st.columns(2)
     with col1:
         company_name = st.text_input("Company name", placeholder="Apple Inc.")
         ticker = st.text_input("Ticker / short ID", placeholder="AAPL")
     with col2:
-        fiscal_year = st.number_input(
-            "Fiscal year", min_value=2000, max_value=2030, value=2023
-        )
+        fiscal_year = st.number_input("Fiscal year", min_value=2000, max_value=2030, value=2023)
         doc_type_hint = st.selectbox(
-            "Document type hint (optional)",
-            options=["", "20-F", "10-K", "annual_report", "earnings_release", "other"],
+            "Document type hint (optional — auto-detected if unsure)",
+            options=["auto-detect", "20-F", "10-K", "annual_report", "earnings_release", "other"],
         )
 
     uploaded_files = st.file_uploader(
@@ -270,10 +280,10 @@ def render_ingest_tab():
 
     if st.button("Start Ingest", type="primary", disabled=not uploaded_files or not company_name):
         progress = st.progress(0, text="Starting ingest...")
-        status_text = st.empty()
+        status = st.empty()
 
         for i, file in enumerate(uploaded_files):
-            status_text.text(f"Uploading {file.name} to PageIndex...")
+            status.text(f"Ingesting {file.name}...")
             try:
                 response = httpx.post(
                     f"{BACKEND_URL}/ingest",
@@ -282,7 +292,7 @@ def render_ingest_tab():
                         "company": company_name,
                         "ticker": ticker,
                         "fiscal_year": str(fiscal_year),
-                        "doc_type_hint": doc_type_hint,
+                        "doc_type_hint": doc_type_hint if doc_type_hint != "auto-detect" else "",
                     },
                     timeout=300.0,
                 )
@@ -290,18 +300,11 @@ def render_ingest_tab():
 
                 if response.status_code == 200:
                     result = response.json()
-                    status = result.get("status", "unknown")
-                    pages = result.get("page_count", 0)
-                    doc_id = result.get("doc_id", "")
-                    if status == "completed":
-                        st.success(
-                            f"✅ {file.name}: Processed ({pages} pages) — {doc_id}"
-                        )
-                    else:
-                        st.info(
-                            f"⏳ {file.name}: Still processing on PageIndex — {doc_id}. "
-                            "Refresh corpus page to check status."
-                        )
+                    st.success(
+                        f"{file.name}: {result.get('chunks_created', 0)} chunks, "
+                        f"{result.get('facts_created', 0)} facts, "
+                        f"{result.get('entities_created', 0)} entities"
+                    )
                 else:
                     st.error(f"{file.name}: ingest failed — {response.text}")
             except Exception as e:

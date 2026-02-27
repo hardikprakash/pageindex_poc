@@ -1,10 +1,79 @@
+# Virtual Environments
 .venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Python
 __pycache__/
-*.pyc
-.env
-*.egg-info/
-dist/
+*.py[cod]
+*$py.class
+*.so
+.Python
 build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Environment Variables
+.env
+.env.local
+.env.*.local
+
+# IDE / Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.sublime-project
+*.sublime-workspace
+
+# Project-specific
+data/pageindex.db
+data/pageindex.db-*
+data/uploads/
+ollama-data/
+
+# Testing
 .pytest_cache/
-metadata.db
-.ingest_checkpoint
+.coverage
+htmlcov/
+.tox/
+
+# Logs
+*.log
+logs/
+
+# OS
+.Thumbs.db
+.AppleDouble
+.LSOverride
+._*
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+.tmp/
+
+# Model Context
+docs/context
